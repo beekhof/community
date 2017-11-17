@@ -9,7 +9,7 @@ Implementation Owner: TBD
 ## Motivation
 
 The network between the Kubernetes api server and worker nodes can be
-interrupted, resulting in the scheduler being unable to know the
+interrupted, resulting in controllers being unable to know the
 status of pods running there. Since 1.8, Kubernetes has defined an
 eviction timeout such that after 5 minutes pods will enter a
 termination state in the api server and will try to shutdown
