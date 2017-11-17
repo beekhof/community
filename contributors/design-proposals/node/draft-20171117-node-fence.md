@@ -56,7 +56,7 @@ suitability criteria:
   members require fencing to continue recovery.
 
 If fencing is deemed appropriate, the FenceController will spawn one
-or more NodeFenceExecution Jobs, depending on the fencing
+or more NodeFenceStage Jobs, depending on the fencing
 configuration.  Each Job will co-ordinate the execution of one or more
 NodeFenceAction Pods, each of which represents a single call to a
 fencing device.
