@@ -89,6 +89,11 @@ The loss of a worker node should be transparent to user's of
 StatefulSets.  Recovery time for affected Pods should be bounded and
 short, allowing scale up/down events to proceed as normal afterwards.
 
+In the absence of this feature, an end-user has no ability to safely
+or reliably allow StatefulSets to be recovered and as such end-users
+will not be provided with a mechanism to enable/disable this
+functionality on a set-by-set basis.
+
 ### Use Cases
 
 1. In a bare metal Kubernetes deployment, StatefulSets should not
