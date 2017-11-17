@@ -61,15 +61,15 @@ configuration.  Each Job will co-ordinate the execution of one or more
 NodeFenceAction Pods, each of which represents a single call to a
 fencing device.
 
-The Pods’ commands will be the name of a fencing agent and any
+The Pods’ command will be the location of a fencing agent and any
 required parameters.  Agents come from the set provided by ClusterLabs
 fence-agents project or conform to the same API, communicate their
 result through their exit codes, and log to stderr to assist trigaing.
 
 The allowance for multiple Jobs is necessary to support boolean-OR
 semantics when evaluating alternatives.  For example, the
-configuration may call for “(network fencing AND disk fencing) OR
-power fencing” in order to prefer network and disk fencing but, if
+configuration may call for _“(network fencing AND disk fencing) OR
+power fencing”_ in order to prefer network and disk fencing but, if
 those fail, fallback to power fencing.
 
 The FenceController will use again the informer API to receive
