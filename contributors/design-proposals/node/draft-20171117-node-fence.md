@@ -1,11 +1,9 @@
 # Node Fencing
 Status: Pending
 
-Version: Alpha
-
 Implementation Owner: Andrew Beekhof (abeekhof@redhat.com)
 
-Current Repository: https://github.com/beekhof/
+Current Repository: https://github.com/beekhof/k8s-community
 
 ## Abstract
 
@@ -18,6 +16,9 @@ Here we describe a native fencing solution for Kubernetes that integrates with t
 [Node Problem Detector](https://github.com/kubernetes/node-problem-detector/), 
 [Cluster](https://github.com/kubernetes-sigs/cluster-api), and 
 [Machine](https://github.com/kubernetes-sigs/cluster-api/blob/master/docs/proposals/machine-api-proposal.md) API efforts.
+
+We further propose a solution for bare metal to show the design is equally
+applicable for non-cloud environments.
 
 ## Motivation
 
@@ -90,6 +91,8 @@ API, cloud backends may choose to support it as Delete+Create, if at all.
   single component but a set of capabilities and no interaction with other
   nodes or the higher level recovery mechanism required.
 
+![component relationships](flow.png)
+
 ### Scenarios
 
 1. A transient error occurs and is resolved before **NPD** detects it
@@ -113,31 +116,15 @@ API, cloud backends may choose to support it as Delete+Create, if at all.
    1. **REM** receives the error condition and starts a timer
    1. In parallel, **WKR** attempts to detect and recover the issue before the timer expires
    1. The timer expires
-   1. the Machine API is invoked to Delete the worker, allowing the workloads to be rescheduled
-   1. the Machine API instructs the configured **ACT** to Delete the worker
+   1. **REM** invokes the Machine API to DELETE the worker, allowing the workloads to be rescheduled
+   1. The Machine API instructs the configured **ACT** to DELETE the worker
    1. **ACT** deprovisions the node
-   1. Failed Jobs will be retried after DELAY until they succeed.
+   1. Failed deprovision operations will be retried after DELAY until they succeed or manually confirmed by the admin.
 
-   In the case of the initial Bare Metal Actuator, *deprovisioning* translates to:
+   In the case of the Pod Based Actuator, *deprovisioning* translates to:
 
    1. **ACT** retrieves the relevant config object for that node
-   1. **ACT** creates a Job to power off the machine using the configuration details.
-
-   Subsequent versions will eventually deprovision the machine like other ACTs.
-
-1. A worker becomes wedged or unreachable while **NPD** is recovering
-   1. As per scenario 1, 3 or 4 depending on how long the condition persists
-
-1. A worker becomes wedged or unreachable while **REM** is recovering
-   1. As per scenario 2, 3 or 4 depending on how long the condition persists
-
-1. A worker with a large workload becomes permanently unreachable (assumes a reboot method is available)
-   1. **NPD** detects the failure and reports an error condition
-   1. **REM** receives the error condition and starts a timer
-   1. The timer expires
-   1. **REM** checks the size of all current workloads
-   1. If any exceed THRESHOLD, a Reboot is requested and the timer is restarted
-   1. As per scenario 4 if the **NPD** does not report the worker is healthy before the timer expires again
+   1. **ACT** creates a Job to delete the machine using the configuration details.
 
 1. A worker being actively triaged becomes permanently unreachable
    1. Admin configures a ‘triage’ node selector (usually by name or tag) in the REM’s configuration
@@ -154,13 +141,26 @@ API, cloud backends may choose to support it as Delete+Create, if at all.
    1. In-progress Delete ops that complete successfully may result in a Create op
    1. In-progress Reboot ops that fail do not result in a Delete op
 
+1. A worker becomes wedged or unreachable while **NPD** is recovering
+   1. As per scenario 1, 3 or 4 depending on how long the condition persists
+
+1. A worker becomes wedged or unreachable while **REM** is recovering
+   1. As per scenario 2, 3 or 4 depending on how long the condition persists
+
+1. A worker with a large workload becomes permanently unreachable (assumes a reboot method is available)
+   1. **NPD** detects the failure and reports an error condition
+   1. **REM** receives the error condition and starts a timer
+   1. The timer expires
+   1. **REM** checks the size of all current workloads
+   1. If any exceed THRESHOLD, a Reboot is requested and the timer is restarted
+   1. As per scenario 4 if the **NPD** does not report the worker is healthy before the timer expires again
+
 
 ### User experience
 
-The loss of a worker node should be transparent to user's of StatefulSets.
-Recovery time for affected Pods should be bounded and short, allowing scale
-up/down events to proceed as normal afterwards.
-
+The loss of a worker node should be transparent to users of StatefulSets.
+Recovery time for affected Pods and Volumes should be bounded and short,
+allowing scale up/down events to proceed as normal afterwards.
 
 In the absence of this feature, an end-user has no ability to safely or
 reliably allow StatefulSets to be recovered and as such end-users will not be
@@ -235,6 +235,7 @@ metadata:
   Name: sample-remediation-config 
 data:
   remediation-config: |
+    enabled: true
     stormThresholdInstances: 10
     triageLabels:  [ kdumpRequestedSeconds, manualTriageSeconds ]
     disruptionLabel:         recovery-seconds
@@ -292,10 +293,10 @@ type RemediationEvent struct {
   Detail   *string `json:"detail"`
 }
 ```
-#### Bare Metal Actuator Configuration ###
+#### Pod Based Actuator Configuration ###
 
 ```go
-type MetalMachineConfig struct {
+type PodActuatorConfigSpec struct {
   // Query that specifies which node(s) this config applies to
   NodeSelector map[string]string `json:"nodeSelector,omitempty"`
 
@@ -323,7 +324,7 @@ type MetalMachineConfig struct {
   PassTargetAs string `json:"passTargetAs,omitempty"`
 
   // Parameters who’s value changes depending on the affected node
-  DynamicConfig []MetalDynamicConfig `json:"dynamicConfig"`
+  DynamicConfig []ActuatorDynamicConfig `json:"dynamicConfig"`
 
   // A list of Kubernetes secrets to securely pass to the container
   Secrets map[string]string `json:"secrets"`
@@ -335,7 +336,7 @@ type MetalMachineConfig struct {
   RetrySeconds *int32 `json:"retrySeconds,omitempty"`
 }
 
-type MetalDynamicConfig struct {
+type ActuatorDynamicConfig struct {
   Field   string            `json:"field"`
   Default string            `json:"default"`
   Values  map[string]string `json:"values"`
@@ -345,71 +346,51 @@ type MetalDynamicConfig struct {
 Example:
 
 ```yaml
-Apiversion: v1
-kind: ConfigMap
+Apiversion: apiextensions.k8s.io/v1beta1
+kind: PodActuatorConfig
 metadata:
   labels:
     app: metal-actuator
-  Name: sample-metal-config 
-data:
-  metal-config: |
-    nodeSelector:
-    - spec.Name: [ hostA, hostB, hostC ]
-    container:
-      name: baremetal-fencing
-      image: quay.io/beekhof/fence-agents:latest
-      cmd: [ "/sbin/fence_ipmilan", "--user", "admin" ]
-    argumentFormat: cli
-    passTargetAs: port
-    passActionAs: o
-    dynamic_config:
-    - field: ip
-      default: 127.0.0.1
-      # If no default is supplied, an error will be logged and the
-      # mechanism will be considered to have failed
-      values:
-      - hostA: 1.2.3.4
-      - hostB: 1.2.3.5
-    secrets:
-    # An optional list of references to secrets in the same
-    # namespace to use when calling fencing modules
-    # (ie. IPMI passwords).
-    - password: ipmi-secret
+  Name: sample-metal-config
+spec: 
+  nodeSelector:
+  - spec.Name: [ hostA, hostB, hostC ]
+  container:
+    name: baremetal-fencing
+    image: quay.io/beekhof/fence-agents:latest
+  createCmd: [ "/sbin/fence_ipmilan", "--user", "admin", "-o", "on" ]
+  deleteCmd: [ "/sbin/fence_ipmilan", "--user", "admin", "-o", "off" ]
+  argumentFormat: cli
+  passTargetAs: port
+  dynamic_config:
+  - field: ip
+    default: 127.0.0.1
+    # If no default is supplied, an error will be logged and the
+    # mechanism will be considered to have failed
+    values:
+    - hostA: 1.2.3.4
+    - hostB: 1.2.3.5
+  secrets:
+  # An optional list of references to secrets in the same
+  # namespace to use when calling fencing modules
+  # (ie. IPMI passwords).
+  - password: ipmi-secret
 ```
 
+#### Pod Based Actuator Implementation
+
+The actuator has, and requires, no knowledge of the commands performed by the
+container to achieve the requested action.  It requires only that:
+
+- after sucessful a DELETE call, the node is in a safe state - suitable for its workloads to be mounted or started elsewhere
+- after sucessful a CREATE call, the node is online and ready to join the k8s cluster
+
+This makes it possible to use the Actuator in BYO environments where only power management is required (perhaps because machines are manually provisioned), as well as environments where integration with an existing provisioning workflow is in place.
 
 
-
-
-
+### Autoscaler Considerations
 
 The design and implementation acknowledge that other entities, such as the autoscaler, are likely to be present and performing similar monitoring and recovery actions. Therefore it is critical that the fencing controller not create or be susceptible to race conditions.
-
-
-
-### Implementation
-#### Fence Controller
-The fence controller is a stateless controller that can be deployed as pod in cluster or process running outside the cluster. The controller identifies unresponsive node by getting events from the apiserver, once node becomes “not ready” the controller posts crd for fence to initiate fence flows.
-
-The controller proidically polls fencenode crds and manage them as follow:
-- status:new - Controller creates job objects for each method in step, move to status:running and update jobs list in nodefence object.
-- status:running - Poll running jobs and check if all done successfully. Set status:done or status:error based on jobs condition.
-- status:done - Check node readiness, if node is ready move to step:recovery. If node still unresponsive, move to step:power-management. If on step:power-management already and not ready move to status:error (move to error after configurable number of pollings before changing status - see cluster-fence-config)
-- status:error - Delete all related jobs and move to status:new to retrigger jobs on different nodes.
-
-Job creation gets the authenticatoin parameters to execute fence agent - This is parsed by the controller from the configmaps as described above. On init the controller reads all fence agents' meta-data to perform parameters extraction for creating the job command. New fence-scripts can be dynamically added by dropping scripts to fence-agents folder and rebuilt the agent image.
-
-#### Executor Job
-Executor is k8s Job that is posted to cluster by the controller. The job is based on centos image including all fence scripts that are available in cluster. The job only executes one command and returns the exit status. The job is monitored and mantained by the controller as described in Fence Controller section.
-Follwing is a list of agents we will integrate using fence scripts:
-- Cluster fence operation - E.g: 1) cordon node 2) cleaning resources - deleting pods from apiserver.
-- https://github.com/ClusterLabs/fence-agents/tree/master/fence/agents/aws - Cloud provider agent for rebooting ec2 machines.
-- https://github.com/ClusterLabs/fence-agents - Scripts for executing pm devices.
-- https://github.com/ClusterLabs/fence-agents/blob/master/fence/agents/compute/fence_compute.py - Fence agent for the automatic resurrection of OpenStack compute instances.
-- https://github.com/ClusterLabs/fence-agents/tree/master/fence/agents/vmware_soap - Cloud provider agent for rebooting vmware machines.
-- https://github.com/ClusterLabs/fence-agents/tree/master/fence/agents/rhevm - Cloud provider agent for rebooting oVirt hosts.
-
-Cloud provider allows us to implement fencing agents that perform power management reboot. In k8s autoscaler implementation the concept of cloud provider is already [implemented](https://github.com/kubernetes/kubernetes/tree/master/pkg/cloudprovider) - we might integrate with that code to support PM operations over AWS and GCE.
 
 
 
@@ -452,3 +433,4 @@ Cloud provider allows us to implement fencing agents that perform power manageme
    the only point of differention is often the the IP addresses of the
    IPMI device, or the port number for a network switch, and it would
    be advantageous to manage the rest in one place.
+
